@@ -2,6 +2,7 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 # Standard
+import os
 import signal
 import socket
 import uuid
@@ -31,6 +32,12 @@ from django_q.conf import (
     psutil,
     setproctitle,
 )
+
+# Optional Prometheus multiprocess support (upstream v1.8.0)
+try:
+    from django_q.conf import prometheus_multiprocess
+except Exception:
+    prometheus_multiprocess = None
 from django_q.humanhash import humanize
 
 # Local
@@ -46,7 +53,6 @@ from .monitor import monitor
 
 
 class MultiTenantCluster(object):
-
     """
     MultiTenantCluster is mirror implementation of Django Q cluster but with added magic for making it work with Django Tenant Schemas package
     """
@@ -71,7 +77,7 @@ class MultiTenantCluster(object):
         # Start Sentinel
 
         if isinstance(self.broker, ORM):
-            logger.info(_(f"Django ORM broker is not supported"))
+            logger.info(_("Django ORM broker is not supported"))
             return
 
         self.stop_event = Event()
@@ -143,7 +149,11 @@ class MultiTenantCluster(object):
 
     @property
     def has_stopped(self) -> bool:
-        return self.start_event is None and self.stop_event is None and self.sentinel
+        return (
+            self.start_event is None
+            and self.stop_event is None
+            and self.sentinel is None
+        )
 
 
 class Sentinel(object):
@@ -246,6 +256,19 @@ class Sentinel(object):
                 % {"name": process.name}
             )
         else:
+            # Check if prometheus is properly configured and mark the process dead
+            # (optional support added in upstream v1.8.0)
+            prometheus_path = os.getenv(
+                "PROMETHEUS_MULTIPROC_DIR",
+                os.getenv("prometheus_multiproc_dir"),
+            )
+            if prometheus_multiprocess and prometheus_path:
+                try:
+                    prometheus_multiprocess.mark_process_dead(process.pid)
+                except Exception:
+                    # If prometheus marking fails for any reason, continue
+                    pass
+
             self.pool.remove(process)
             self.spawn_worker()
             if process.timer.value == 0:

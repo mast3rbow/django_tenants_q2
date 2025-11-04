@@ -13,15 +13,17 @@ from django_q.brokers import get_broker
 from django_q.signals import pre_enqueue
 from django_q.signing import SignedPackage
 from django_tenants.utils import schema_context
-from django_q.tasks import (schedule,
-                            result,
-                            result_group,
-                            fetch,
-                            fetch_group,
-                            count_group,
-                            delete_group,
-                            delete_cached,
-                            queue_size)
+from django_q.tasks import (
+    schedule,
+    result,
+    result_group,
+    fetch,
+    fetch_group,
+    count_group,
+    delete_group,
+    delete_cached,
+    queue_size,
+)
 
 
 class QUtilities(object):
@@ -112,11 +114,13 @@ class QUtilities(object):
             return result(task_id, wait, cached)
 
     @staticmethod
-    def get_result_group(group_id, failures=False, wait=0, count=None, cached=Conf.CACHED):
+    def get_result_group(
+        group_id, failures=False, wait=0, count=None, cached=Conf.CACHED
+    ):
         # Wrapper method to get result of a group with awareness of schema
         schema_name = connection.schema_name
         with schema_context(schema_name):
-            return result_group(group_id, failures=False, wait=0, count=None, cached=Conf.CACHED)
+            return result_group(group_id, failures, wait, count, cached=cached)
 
     @staticmethod
     def fetch_task(task_id, wait=0, cached=Conf.CACHED):
@@ -126,7 +130,9 @@ class QUtilities(object):
             return fetch(task_id, wait, cached)
 
     @staticmethod
-    def fetch_task_group(group_id, failures=True, wait=0, count=None, cached=Conf.CACHED):
+    def fetch_task_group(
+        group_id, failures=True, wait=0, count=None, cached=Conf.CACHED
+    ):
         # Wrapper method to get a group with tasks with awareness of schema
         schema_name = connection.schema_name
         with schema_context(schema_name):
@@ -186,7 +192,9 @@ class QUtilities(object):
         return iter_group
 
     @staticmethod
-    def create_async_tasks_chain(chain, group=None, cached=Conf.CACHED, sync=Conf.SYNC, broker=None):
+    def create_async_tasks_chain(
+        chain, group=None, cached=Conf.CACHED, sync=Conf.SYNC, broker=None
+    ):
         """
         Wrapper method around async_chain that enqueues a chain of tasks
         the chain must be in the format [(func,(args),{kwargs}),(func,(args),{kwargs})]

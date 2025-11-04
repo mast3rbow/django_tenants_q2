@@ -110,23 +110,55 @@ def save_task(task, broker: Broker):
 
         if schema_name:
             with schema_context(schema_name):
-                if task["success"] and 0 < Conf.SAVE_LIMIT <= Success.objects.count():
-                    Success.objects.last().delete()
-                # check if this task has previous results
+                # check SAVE_LIMIT_PER filters (per group/name/func) to prune correctly
+                filters = {}
+                if (
+                    Conf.SAVE_LIMIT_PER
+                    and Conf.SAVE_LIMIT_PER in {"group", "name", "func"}
+                    and Conf.SAVE_LIMIT_PER in task
+                ):
+                    value = task[Conf.SAVE_LIMIT_PER]
+                    if Conf.SAVE_LIMIT_PER == "func":
+                        value = get_func_repr(value)
+                    filters[Conf.SAVE_LIMIT_PER] = value
 
-                if Task.objects.filter(id=task["id"], name=task["name"]).exists():
-                    existing_task = Task.objects.get(id=task["id"], name=task["name"])
+                # check if we should clean the success tasks
+                if Conf.SAVE_LIMIT > 0:
+                    with db.transaction.atomic(using=db.router.db_for_write(Success)):
+                        success_tasks_qs = Success.objects.filter(**filters)
+                        success_tasks_pks = [
+                            success_task.pk
+                            for success_task in success_tasks_qs.select_for_update()
+                        ]
+                        if (
+                            task["success"]
+                            and len(success_tasks_pks) >= Conf.SAVE_LIMIT
+                        ):
+                            success_tasks_qs.last().delete()
+
+                # check if this task has previous results
+                try:
+                    task_obj = Task.objects.get(id=task["id"], name=task["name"])
                     # only update the result if it hasn't succeeded yet
-                    if not existing_task.success:
-                        existing_task.stopped = task["stopped"]
-                        existing_task.result = task["result"]
-                        existing_task.success = task["success"]
-                        existing_task.save()
-                else:
-                    Task.objects.create(
+                    if not task_obj.success:
+                        task_obj.stopped = task["stopped"]
+                        task_obj.result = task["result"]
+                        task_obj.success = task["success"]
+                        # increment attempt count if present
+                        try:
+                            task_obj.attempt_count = task_obj.attempt_count + 1
+                        except Exception:
+                            # model might not have attempt_count, ignore if so
+                            pass
+                        task_obj.save()
+
+                except Task.DoesNotExist:
+                    # convert func to string representation
+                    func = get_func_repr(task["func"])
+                    create_kwargs = dict(
                         id=task["id"],
                         name=task["name"],
-                        func=task["func"],
+                        func=func,
                         hook=task.get("hook"),
                         args=task["args"],
                         kwargs=task["kwargs"],
@@ -136,11 +168,31 @@ def save_task(task, broker: Broker):
                         group=task.get("group"),
                         success=task["success"],
                     )
+                    # attempt_count on create if model supports it
+                    try:
+                        create_kwargs["attempt_count"] = 1
+                    except Exception:
+                        pass
+                    Task.objects.create(**create_kwargs)
+
+                # handle max attempts acknowledgement
+                try:
+                    task_obj = Task.objects.get(id=task["id"], name=task["name"])
+                    if (
+                        Conf.MAX_ATTEMPTS > 0
+                        and hasattr(task_obj, "attempt_count")
+                        and task_obj.attempt_count >= Conf.MAX_ATTEMPTS
+                        and task.get("ack_id")
+                    ):
+                        broker.acknowledge(task["ack_id"])
+                except Task.DoesNotExist:
+                    # nothing to acknowledge
+                    pass
         else:
             logger.error("No schema name provided for saving the task")
 
-    except Exception as e:
-        logger.error(e)
+    except Exception:
+        logger.exception("Could not save task result")
 
 
 def save_cached(task, broker):
