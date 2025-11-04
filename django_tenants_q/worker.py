@@ -3,6 +3,7 @@ import traceback
 from multiprocessing import Value
 from multiprocessing.process import current_process
 from multiprocessing.queues import Queue
+import inspect
 
 from django import core
 from django.utils import timezone
@@ -135,7 +136,40 @@ def worker(
                 else:
                     with TimeoutHandler(timer_value):
                         with schema_context(schema_name):
-                            res = f(*task["args"], **task["kwargs"])
+                            # Prepare kwargs according to the function signature so we don't pass unexpected
+                            # framework kwargs (like 'schema_name') to user functions that don't accept them.
+                            call_args = task.get("args", ())
+                            call_kwargs = (task.get("kwargs") or {}).copy()
+                            accept_kwargs = True
+                            try:
+                                sig = inspect.signature(f)
+                                params = sig.parameters
+                                # If the function accepts **kwargs, pass all kwargs through
+                                if any(
+                                    p.kind == inspect.Parameter.VAR_KEYWORD
+                                    for p in params.values()
+                                ):
+                                    accept_kwargs = True
+                                else:
+                                    # Otherwise, only keep kwargs that match parameter names
+                                    allowed = set(params.keys())
+                                    # Remove 'self'/'cls' from allowed for bound methods
+                                    allowed.discard("self")
+                                    allowed.discard("cls")
+                                    call_kwargs = {
+                                        k: v
+                                        for k, v in call_kwargs.items()
+                                        if k in allowed
+                                    }
+                                    accept_kwargs = bool(call_kwargs)
+                            except (ValueError, TypeError):
+                                # Builtins or C extensions may not have a signature; assume they accept kwargs
+                                accept_kwargs = True
+
+                            if accept_kwargs:
+                                res = f(*call_args, **call_kwargs)
+                            else:
+                                res = f(*call_args)
                     result = (res, True)
             except (Exception, TimeoutException) as e:
                 if isinstance(e, TimeoutException):
