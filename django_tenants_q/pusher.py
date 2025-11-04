@@ -44,7 +44,10 @@ def pusher(task_queue: Queue, event: Event, broker: Broker = None):
         try:
             task_set = broker.dequeue()
         except Exception:
-            logger.exception("Failed to pull task from broker")
+            logger.exception(
+                "Failed to pull task from broker (%s)",
+                getattr(broker, "list_key", None),
+            )
             # broker probably crashed. Let the sentinel handle it.
             sleep(10)
             break
@@ -55,7 +58,11 @@ def pusher(task_queue: Queue, event: Event, broker: Broker = None):
                 try:
                     task = SignedPackage.loads(task[1])
                 except (TypeError, BadSignature):
-                    logger.exception("Failed to push task to queue")
+                    logger.exception(
+                        "Failed to push task to queue (ack_id=%s, list_key=%s)",
+                        ack_id,
+                        getattr(broker, "list_key", None),
+                    )
                     broker.fail(ack_id)
                     continue
                 task["cluster"] = Conf.CLUSTER_NAME

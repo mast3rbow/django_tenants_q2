@@ -16,9 +16,10 @@ except core.exceptions.AppRegistryNotReady:
 
     django.setup()
 
-from inspect import getfullargspec
 from django_q.conf import Conf, error_reporter, logger, resource, setproctitle
+from django_q.exceptions import TimeoutException
 from django_q.signals import post_spawn, pre_execute
+from django_q.timeout import TimeoutHandler
 from django_q.utils import close_old_django_connections, get_func_repr
 from django_tenants.utils import schema_context
 
@@ -100,26 +101,45 @@ def worker(
             timer_value = task.pop("timeout", timeout)
             # signal execution
             pre_execute.send(sender="django_q", func=f, task=task)
-            # execute the payload
+            # execute the payload with a timeout handler
             timer.value = timer_value  # Busy
+            # Add a small buffer so the guard doesn't kill the process
+            if timer.value != -1:
+                timer.value += 3
 
+            timeout_error = False
             try:
-                # Checking for the presence of kwargs
-                args_state = getfullargspec(f)
-
+                if f is None:
+                    # raise a meaningful error if task['func'] is not a valid function
+                    raise ValueError(f"Function {task['func']} is not defined")
                 kwargs = task.get("kwargs", {})
                 schema_name = kwargs.get("schema_name", None)
-                if schema_name:
-                    with schema_context(schema_name):
-                        if args_state.varkw:
-                            res = f(*task["args"], **task["kwargs"])
-                        else:
-                            res = f(*task["args"])
-                        result = (res, True)
+                if not schema_name:
+                    # Tasks must always provide a schema_name for multi-tenant setups
+                    msg = (
+                        f"Missing 'schema_name' in task kwargs for task id={task.get('id')} "
+                        f"name={task.get('name')}"
+                    )
+                    logger.error(msg)
+                    if error_reporter:
+                        try:
+                            error_reporter.report()
+                        except Exception:
+                            # Don't let reporting failures crash the worker
+                            pass
+                    if task.get("sync", False):
+                        # For synchronous tasks, raise so caller can handle the error
+                        raise ValueError(msg)
+                    # For async tasks, mark as failed and continue without executing
+                    result = (msg, False)
                 else:
-                    result = (None, False)
-
-            except Exception as e:
+                    with TimeoutHandler(timer_value):
+                        with schema_context(schema_name):
+                            res = f(*task["args"], **task["kwargs"])
+                    result = (res, True)
+            except (Exception, TimeoutException) as e:
+                if isinstance(e, TimeoutException):
+                    timeout_error = True
                 result = (f"{e} : {traceback.format_exc()}", False)
                 if error_reporter:
                     error_reporter.report()
@@ -131,6 +151,11 @@ def worker(
                 task["success"] = result[1]
                 task["stopped"] = timezone.now()
                 result_queue.put(task)
+                if timeout_error:
+                    # force destroy process due to timeout
+                    timer.value = 0
+                    break
+
                 timer.value = -1  # Idle
                 if setproctitle:
                     setproctitle.setproctitle(f"qcluster {proc_name} idle")
